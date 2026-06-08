@@ -1,0 +1,31 @@
+# Compiled binaries
+*.exe
+*.exe~
+*.dll
+*.so
+*.dylib
+/bin/
+/knock
+/knock-cli
+/knock-signal
+
+# Test / coverage
+*.test
+*.out
+coverage.*
+
+# Go workspace
+go.work
+go.work.sum
+
+# Secrets / local config
+.env
+*.local
+
+# OS / editor cruft
+.DS_Store
+Thumbs.db
+.idea/
+
+# Documentation — private working notes for our collaboration, kept local only
+/docs/
