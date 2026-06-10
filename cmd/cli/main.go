@@ -7,6 +7,8 @@ import (
 	"log"
 	"net"
 	"os"
+
+	"github.com/amankhandelwaal/knock/core"
 )
 
 // receive blocks on the socket and prints every datagram that arrives.
@@ -24,7 +26,8 @@ func receive(conn *net.UDPConn) {
 
 func main() {
 	listenPort := flag.String("listen", "9000", "local UDP port to listen on")
-	peerAddr := flag.String("peer", "", "peer's address as host:port")
+	peerAddr := flag.String("peer", "", "peer's address as host:port (optional)")
+	stunServer := flag.String("stun", "stun.l.google.com:19302", "STUN server for public-address discovery")
 	flag.Parse()
 
 	localAddr, err := net.ResolveUDPAddr("udp", ":"+*listenPort)
@@ -38,20 +41,30 @@ func main() {
 	}
 	defer conn.Close()
 
-	// Resolve the peer's address — now we actually need it as a destination.
+	fmt.Println("listening on", conn.LocalAddr())
+
+	// Discover our public address via STUN — on this same socket.
+	publicAddr, err := core.DiscoverPublicAddr(conn, *stunServer)
+	if err != nil {
+		log.Fatal(err)
+	}
+	fmt.Println("public address:", publicAddr)
+
+	// No peer given → we were only doing address discovery. Stop here.
+	if *peerAddr == "" {
+		return
+	}
+
+	// Otherwise, chat with the peer over the same socket (Stage 0).
 	remoteAddr, err := net.ResolveUDPAddr("udp", *peerAddr)
 	if err != nil {
 		log.Fatal(err)
 	}
-
-	fmt.Println("listening on", conn.LocalAddr())
 	fmt.Println("peer:", remoteAddr)
 	fmt.Println("type a message and press enter:")
 
-	// Receive in the background so we can read the keyboard at the same time.
 	go receive(conn)
 
-	// Send loop: read a line from the keyboard, fire it to the peer.
 	scanner := bufio.NewScanner(os.Stdin)
 	for scanner.Scan() {
 		line := scanner.Text()
