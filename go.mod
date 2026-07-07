@@ -1,8 +1,11 @@
 module github.com/amankhandelwaal/knock
 
-go 1.22
+go 1.23
 
-require github.com/pion/stun v0.6.1
+require (
+	github.com/coder/websocket v1.8.15
+	github.com/pion/stun v0.6.1
+)
 
 require (
 	github.com/pion/dtls/v2 v2.2.7 // indirect
