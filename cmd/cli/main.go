@@ -3,6 +3,7 @@ package main
 import (
 	"bufio"
 	"context"
+	"crypto/ed25519"
 	"flag"
 	"fmt"
 	"log"
@@ -47,7 +48,16 @@ func main() {
 	stunServer := flag.String("stun", "stun.l.google.com:19302", "STUN server for public-address discovery")
 	signalURL := flag.String("signal", "ws://localhost:4000", "signaling server URL")
 	room := flag.String("room", "", "rendezvous room code to find your peer")
+	identityPath := flag.String("identity", "knock-identity.key", "path to this device's identity key file")
 	flag.Parse()
+
+	// Load (or create on first run) this device's long-term identity.
+	identity, err := core.LoadOrCreateIdentity(*identityPath)
+	if err != nil {
+		log.Fatal(err)
+	}
+	pub := identity.Public().(ed25519.PublicKey)
+	fmt.Println("identity:", core.Fingerprint(pub))
 
 	localAddr, err := net.ResolveUDPAddr("udp", ":"+*listenPort)
 	if err != nil {
