@@ -4,11 +4,13 @@ import (
 	"bufio"
 	"context"
 	"crypto/ed25519"
+	"crypto/tls"
 	"flag"
 	"fmt"
 	"log"
 	"net"
 	"os"
+	"time"
 
 	"github.com/amankhandelwaal/knock/core"
 	"github.com/coder/websocket"
@@ -106,8 +108,31 @@ func main() {
 		if err := core.Punch(conn, remoteAddr); err != nil {
 			log.Fatal(err)
 		}
-		fmt.Println("connected! type a message and press enter:")
-		chat(conn, remoteAddr)
+		fmt.Println("punched — upgrading to an encrypted QUIC channel...")
+
+		// Wrap the punched socket in QUIC (TLS 1.3). The trust check (pinning)
+		// is deferred to 3c; here we only prove the encrypted handshake stands up.
+		cert, err := core.SelfSignedCert(identity)
+		if err != nil {
+			log.Fatal(err)
+		}
+		hsCtx, cancel := context.WithTimeout(context.Background(), 15*time.Second)
+		defer cancel()
+		secureConn, err := core.SecureChannel(hsCtx, conn, publicAddr.String(), intro.Addr, cert)
+		if err != nil {
+			log.Fatal("secure channel: ", err)
+		}
+		defer secureConn.CloseWithError(0, "bye")
+
+		state := secureConn.ConnectionState().TLS
+		fmt.Println("secure channel established:")
+		fmt.Println("  TLS version: ", tls.VersionName(state.Version))
+		fmt.Println("  cipher suite:", tls.CipherSuiteName(state.CipherSuite))
+		if len(state.PeerCertificates) > 0 {
+			if peerPub, ok := state.PeerCertificates[0].PublicKey.(ed25519.PublicKey); ok {
+				fmt.Println("  peer identity:", core.Fingerprint(peerPub))
+			}
+		}
 		return
 	}
 
