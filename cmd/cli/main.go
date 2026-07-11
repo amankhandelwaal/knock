@@ -5,6 +5,7 @@ import (
 	"context"
 	"crypto/ed25519"
 	"crypto/tls"
+	"encoding/hex"
 	"flag"
 	"fmt"
 	"log"
@@ -51,6 +52,7 @@ func main() {
 	signalURL := flag.String("signal", "ws://localhost:4000", "signaling server URL")
 	room := flag.String("room", "", "rendezvous room code to find your peer")
 	identityPath := flag.String("identity", "knock-identity.key", "path to this device's identity key file")
+	peerKeyHex := flag.String("peer-key", "", "expected peer identity fingerprint (hex) to pin; refuses the connection on mismatch")
 	flag.Parse()
 
 	// Load (or create on first run) this device's long-term identity.
@@ -60,6 +62,19 @@ func main() {
 	}
 	pub := identity.Public().(ed25519.PublicKey)
 	fmt.Println("identity:", core.Fingerprint(pub))
+
+	// If a peer key was given, decode it now so a malformed flag fails fast.
+	var expectedKey ed25519.PublicKey
+	if *peerKeyHex != "" {
+		raw, err := hex.DecodeString(*peerKeyHex)
+		if err != nil {
+			log.Fatalf("invalid -peer-key: %v", err)
+		}
+		if len(raw) != ed25519.PublicKeySize {
+			log.Fatalf("invalid -peer-key: expected %d bytes, got %d", ed25519.PublicKeySize, len(raw))
+		}
+		expectedKey = ed25519.PublicKey(raw)
+	}
 
 	localAddr, err := net.ResolveUDPAddr("udp", ":"+*listenPort)
 	if err != nil {
@@ -116,9 +131,12 @@ func main() {
 		if err != nil {
 			log.Fatal(err)
 		}
+		if expectedKey != nil {
+			fmt.Println("pinning peer key:", core.Fingerprint(expectedKey))
+		}
 		hsCtx, cancel := context.WithTimeout(context.Background(), 15*time.Second)
 		defer cancel()
-		secureConn, err := core.SecureChannel(hsCtx, conn, publicAddr.String(), intro.Addr, cert)
+		secureConn, err := core.SecureChannel(hsCtx, conn, publicAddr.String(), intro.Addr, cert, expectedKey)
 		if err != nil {
 			log.Fatal("secure channel: ", err)
 		}
