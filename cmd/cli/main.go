@@ -97,7 +97,7 @@ func main() {
 	// Mode 1: a room → find a peer via signaling, punch a hole, then chat.
 	if *room != "" {
 		ctx := context.Background()
-		sigConn, err := core.Register(ctx, *signalURL, *room, publicAddr.String())
+		sigConn, err := core.Register(ctx, *signalURL, *room, publicAddr.String(), core.Fingerprint(pub))
 		if err != nil {
 			log.Fatal(err)
 		}
@@ -114,7 +114,29 @@ func main() {
 		}
 		fmt.Println("introduced to peer at", intro.Addr)
 
-		// Punch a hole to the peer, then chat over the same socket.
+		// Decide which key to pin. A -peer-key given out-of-band always wins and
+		// is enforced; otherwise fall back to trust-on-first-use (TOFU): pin
+		// whatever key the signaling server relayed. Either way we print the
+		// fingerprint so it can be checked out-of-band (the Signal "safety
+		// number" idea) — TOFU trusts the server, so that check is how you catch
+		// a server that lied.
+		pinnedKey := expectedKey
+		if pinnedKey == nil {
+			raw, err := hex.DecodeString(intro.Key)
+			if err != nil || len(raw) != ed25519.PublicKeySize {
+				log.Fatalf("no -peer-key set and signaling gave no usable key (got %q)", intro.Key)
+			}
+			pinnedKey = ed25519.PublicKey(raw)
+			fmt.Println("TOFU — pinning peer key from signaling:", intro.Key, "(verify out-of-band!)")
+		} else {
+			if intro.Key != "" && intro.Key != core.Fingerprint(expectedKey) {
+				fmt.Printf("WARNING: signaling advertised %s but enforcing your -peer-key %s\n",
+					intro.Key, core.Fingerprint(expectedKey))
+			}
+			fmt.Println("pinning peer key (-peer-key):", core.Fingerprint(expectedKey))
+		}
+
+		// Punch a hole to the peer, then upgrade the socket to encrypted QUIC.
 		remoteAddr, err := net.ResolveUDPAddr("udp", intro.Addr)
 		if err != nil {
 			log.Fatal(err)
@@ -125,18 +147,13 @@ func main() {
 		}
 		fmt.Println("punched — upgrading to an encrypted QUIC channel...")
 
-		// Wrap the punched socket in QUIC (TLS 1.3). The trust check (pinning)
-		// is deferred to 3c; here we only prove the encrypted handshake stands up.
 		cert, err := core.SelfSignedCert(identity)
 		if err != nil {
 			log.Fatal(err)
 		}
-		if expectedKey != nil {
-			fmt.Println("pinning peer key:", core.Fingerprint(expectedKey))
-		}
 		hsCtx, cancel := context.WithTimeout(context.Background(), 15*time.Second)
 		defer cancel()
-		secureConn, err := core.SecureChannel(hsCtx, conn, publicAddr.String(), intro.Addr, cert, expectedKey)
+		secureConn, err := core.SecureChannel(hsCtx, conn, publicAddr.String(), intro.Addr, cert, pinnedKey)
 		if err != nil {
 			log.Fatal("secure channel: ", err)
 		}

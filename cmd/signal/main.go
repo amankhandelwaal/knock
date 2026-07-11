@@ -16,6 +16,7 @@ import (
 type peer struct {
 	conn *websocket.Conn
 	addr string // its public IP:port, discovered via STUN
+	key  string // its identity fingerprint (hex), relayed to the other peer for TOFU
 }
 
 // hub tracks who is waiting in each room. Safe for concurrent use because every
@@ -72,18 +73,19 @@ func main() {
 		}
 		log.Printf("registered: room=%q addr=%s", msg.Room, msg.Addr)
 
-		me := &peer{conn: conn, addr: msg.Addr}
+		me := &peer{conn: conn, addr: msg.Addr, key: msg.Key}
 		other := h.join(msg.Room, me)
 
 		if other == nil {
 			log.Printf("room %q: waiting for a second peer", msg.Room)
 		} else {
-			// Two peers share the room — introduce them to each other.
+			// Two peers share the room — introduce them, relaying each one's
+			// address AND identity fingerprint so the other can pin it (TOFU).
 			log.Printf("room %q: pairing %s <-> %s", msg.Room, me.addr, other.addr)
-			if err := wsjson.Write(ctx, me.conn, core.Message{Type: "peer", Addr: other.addr}); err != nil {
+			if err := wsjson.Write(ctx, me.conn, core.Message{Type: "peer", Addr: other.addr, Key: other.key}); err != nil {
 				log.Println("introduce (me):", err)
 			}
-			if err := wsjson.Write(ctx, other.conn, core.Message{Type: "peer", Addr: me.addr}); err != nil {
+			if err := wsjson.Write(ctx, other.conn, core.Message{Type: "peer", Addr: me.addr, Key: me.key}); err != nil {
 				log.Println("introduce (other):", err)
 			}
 		}
