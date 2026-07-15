@@ -10,10 +10,11 @@ import (
 
 // Message is the JSON envelope exchanged with the signaling server.
 type Message struct {
-	Type string `json:"type"`           // what kind of message, e.g. "register"
-	Room string `json:"room,omitempty"` // the shared rendezvous code two peers agree on
-	Addr string `json:"addr,omitempty"` // a peer's public IP:port (discovered via STUN)
-	Key  string `json:"key,omitempty"`  // a peer's identity fingerprint (hex) for TOFU pinning
+	Type   string `json:"type"`             // what kind of message, e.g. "register"
+	Room   string `json:"room,omitempty"`   // the shared rendezvous code two peers agree on
+	Addr   string `json:"addr,omitempty"`   // a peer's public IP:port (discovered via STUN)
+	Key    string `json:"key,omitempty"`    // a peer's identity fingerprint (hex) for TOFU pinning
+	Listen bool   `json:"listen,omitempty"` // in a "peer" intro: should the recipient listen (vs dial)?
 }
 
 // Register dials the signaling server over WebSocket and announces this peer —
