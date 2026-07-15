@@ -9,6 +9,7 @@ import (
 	"fmt"
 	"io"
 	"net"
+	"time"
 
 	"github.com/quic-go/quic-go"
 )
@@ -18,40 +19,82 @@ import (
 // handshake fails.
 const alpn = "knock/1"
 
+// keepAlivePeriod holds the NAT mapping open (below the typical UDP timeout) and
+// gives timely liveness detection; maxIdleTimeout bounds a half-open session.
+// See DECISIONS §1/§3 — both are set explicitly rather than left to defaults.
+const (
+	keepAlivePeriod = 15 * time.Second
+	maxIdleTimeout  = 30 * time.Second
+)
+
+// Session is an established, encrypted, mutually key-pinned connection to a peer.
+// Close it to tear down the connection and release the transport's background
+// goroutines and its ownership of the UDP socket.
+type Session struct {
+	Conn      *quic.Conn
+	transport *quic.Transport
+	dialed    bool
+}
+
 // SecureChannel upgrades an already-punched UDP socket to an encrypted QUIC
-// connection with the peer. Both peers call it on the very socket they punched
-// with — QUIC takes the socket over from here. Because TLS is asymmetric (one
-// side dials, one listens) but our peers are symmetric, we break the tie
-// deterministically: the peer with the lexicographically smaller public address
-// listens, the other dials. Both sides compute this identically, so no extra
-// round-trip is needed to agree on roles.
-func SecureChannel(ctx context.Context, conn *net.UDPConn, localAddr, peerAddr string, cert tls.Certificate, expectedKey ed25519.PublicKey) (*quic.Conn, bool, error) {
+// connection with the peer, pinned to expectedKey. A pinned key is REQUIRED —
+// without one we refuse rather than form an unauthenticated channel, so the
+// connection can never silently downgrade. TLS is asymmetric (one side dials,
+// one listens); which role we take is decided by the signaling server (the peer
+// already waiting in the room listens, the one that just joined dials) and
+// passed in as `listen`, so there is no address tie or race to resolve here —
+// and both peers agree on roles even if their pinned keys disagree.
+func SecureChannel(ctx context.Context, conn *net.UDPConn, peerAddr string, cert tls.Certificate, expectedKey ed25519.PublicKey, listen bool) (*Session, error) {
+	if expectedKey == nil {
+		return nil, errors.New("secure channel: a pinned peer key is required")
+	}
+	priv, ok := cert.PrivateKey.(ed25519.PrivateKey)
+	if !ok {
+		return nil, errors.New("secure channel: certificate key is not ed25519")
+	}
+	if priv.Public().(ed25519.PublicKey).Equal(expectedKey) {
+		return nil, errors.New("secure channel: peer identity equals our own (self-pairing?)")
+	}
+
 	tr := &quic.Transport{Conn: conn}
 
 	tlsConf := &tls.Config{
 		Certificates: []tls.Certificate{cert}, // present our identity cert
 		NextProtos:   []string{alpn},          // ALPN — mandatory for QUIC
 		// TLS's own chain check is useless to us (self-signed, no CA), so we
-		// turn it off and do our OWN check below instead: pin the peer's key.
-		InsecureSkipVerify: true,
-		ClientAuth:         tls.RequireAnyClientCert, // force the peer to present a cert too
+		// turn it off and do our OWN check instead: pin the peer's key. The
+		// callback runs on both sides (client checks server, server checks
+		// client), so pinning is mutual and the handshake fails closed.
+		InsecureSkipVerify:    true,
+		ClientAuth:            tls.RequireAnyClientCert,
+		VerifyPeerCertificate: pinKey(expectedKey),
 	}
-	// If we know which key to expect, pin it: the handshake now fails closed
-	// unless the peer proves possession of exactly that key. The callback runs
-	// on both sides (client checks server, server checks client) — mutual.
-	if expectedKey != nil {
-		tlsConf.VerifyPeerCertificate = pinKey(expectedKey)
+	quicConf := &quic.Config{
+		KeepAlivePeriod: keepAlivePeriod,
+		MaxIdleTimeout:  maxIdleTimeout,
 	}
-	quicConf := &quic.Config{}
 
-	// Return whether we dialed, so the caller knows to open (dialer) or accept
-	// (listener) the chat stream.
-	if localAddr < peerAddr {
-		qc, err := accept(ctx, tr, tlsConf, quicConf)
-		return qc, false, err
+	var qc *quic.Conn
+	var err error
+	if listen {
+		qc, err = accept(ctx, tr, tlsConf, quicConf)
+	} else {
+		qc, err = dial(ctx, tr, peerAddr, tlsConf, quicConf)
 	}
-	qc, err := dial(ctx, tr, peerAddr, tlsConf, quicConf)
-	return qc, true, err
+	if err != nil {
+		tr.Close() // release the transport's goroutines + socket ownership on failure
+		return nil, err
+	}
+	return &Session{Conn: qc, transport: tr, dialed: !listen}, nil
+}
+
+// Close tears down the connection and the transport. Closing the transport stops
+// its background goroutines and releases its ownership of the UDP socket; it does
+// not close the socket itself (we handed it an existing one), so the caller still
+// owns closing that.
+func (s *Session) Close() error {
+	s.Conn.CloseWithError(0, "bye")
+	return s.transport.Close()
 }
 
 // dial is the client half: reach out to the peer and run the QUIC handshake.
@@ -60,25 +103,27 @@ func dial(ctx context.Context, tr *quic.Transport, peerAddr string, tlsConf *tls
 	if err != nil {
 		return nil, fmt.Errorf("resolve peer addr %q: %w", peerAddr, err)
 	}
-	conn, err := tr.Dial(ctx, udpAddr, tlsConf, quicConf)
+	qc, err := tr.Dial(ctx, udpAddr, tlsConf, quicConf)
 	if err != nil {
 		return nil, fmt.Errorf("quic dial: %w", err)
 	}
-	return conn, nil
+	return qc, nil
 }
 
 // accept is the server half: listen on the shared socket and take the one
-// incoming connection our peer dials.
+// incoming connection our peer dials. We only ever want one connection, so the
+// listener is closed as soon as we have it (the accepted connection survives it).
 func accept(ctx context.Context, tr *quic.Transport, tlsConf *tls.Config, quicConf *quic.Config) (*quic.Conn, error) {
 	ln, err := tr.Listen(tlsConf, quicConf)
 	if err != nil {
 		return nil, fmt.Errorf("quic listen: %w", err)
 	}
-	conn, err := ln.Accept(ctx)
+	defer ln.Close()
+	qc, err := ln.Accept(ctx)
 	if err != nil {
 		return nil, fmt.Errorf("quic accept: %w", err)
 	}
-	return conn, nil
+	return qc, nil
 }
 
 // pinKey returns a TLS verification callback that accepts the peer ONLY if the
@@ -116,24 +161,24 @@ const streamHello = 'K'
 // OpenChatStream returns the one bidirectional stream both peers talk over. The
 // dialer opens it and sends streamHello; the listener accepts it and discards
 // that byte. After this the stream is used symmetrically by both sides.
-func OpenChatStream(ctx context.Context, conn *quic.Conn, dialed bool) (*quic.Stream, error) {
-	if dialed {
-		s, err := conn.OpenStreamSync(ctx)
+func (s *Session) OpenChatStream(ctx context.Context) (*quic.Stream, error) {
+	if s.dialed {
+		st, err := s.Conn.OpenStreamSync(ctx)
 		if err != nil {
 			return nil, fmt.Errorf("open stream: %w", err)
 		}
-		if _, err := s.Write([]byte{streamHello}); err != nil {
+		if _, err := st.Write([]byte{streamHello}); err != nil {
 			return nil, fmt.Errorf("send stream hello: %w", err)
 		}
-		return s, nil
+		return st, nil
 	}
-	s, err := conn.AcceptStream(ctx)
+	st, err := s.Conn.AcceptStream(ctx)
 	if err != nil {
 		return nil, fmt.Errorf("accept stream: %w", err)
 	}
 	var b [1]byte
-	if _, err := io.ReadFull(s, b[:]); err != nil {
+	if _, err := io.ReadFull(st, b[:]); err != nil {
 		return nil, fmt.Errorf("read stream hello: %w", err)
 	}
-	return s, nil
+	return st, nil
 }

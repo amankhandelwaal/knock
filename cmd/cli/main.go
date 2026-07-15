@@ -6,6 +6,7 @@ import (
 	"crypto/ed25519"
 	"crypto/tls"
 	"encoding/hex"
+	"errors"
 	"flag"
 	"fmt"
 	"io"
@@ -25,32 +26,59 @@ func receive(conn *net.UDPConn) {
 	for {
 		n, from, err := conn.ReadFromUDP(buf)
 		if err != nil {
+			if errors.Is(err, net.ErrClosed) {
+				return // normal: the socket was closed on shutdown
+			}
 			log.Fatal(err)
 		}
 		fmt.Printf("[%s] %s\n", from, buf[:n])
 	}
 }
 
-// chatStream runs the two-way text chat over an encrypted QUIC stream: a reader
-// goroutine prints incoming lines while the main loop sends what you type.
+// chatStream runs the two-way text chat over an encrypted QUIC stream. A reader
+// goroutine prints incoming lines and signals `peerGone` when the stream ends; a
+// stdin goroutine feeds typed lines. The main loop selects between them, so it
+// stops promptly when the peer hangs up instead of blocking forever on stdin.
 func chatStream(stream io.ReadWriter) {
+	peerGone := make(chan struct{})
 	go func() {
+		defer close(peerGone)
 		scanner := bufio.NewScanner(stream)
 		for scanner.Scan() {
 			fmt.Println("peer:", scanner.Text())
 		}
 		if err := scanner.Err(); err != nil {
 			log.Println("peer stream closed:", err)
+		} else {
+			fmt.Println("peer disconnected.")
 		}
 	}()
-	scanner := bufio.NewScanner(os.Stdin)
-	for scanner.Scan() {
-		if _, err := fmt.Fprintln(stream, scanner.Text()); err != nil {
-			log.Fatal("stream write: ", err)
+
+	lines := make(chan string)
+	go func() {
+		scanner := bufio.NewScanner(os.Stdin)
+		for scanner.Scan() {
+			lines <- scanner.Text()
 		}
-	}
-	if err := scanner.Err(); err != nil {
-		log.Fatal("stdin: ", err)
+		if err := scanner.Err(); err != nil {
+			log.Println("stdin:", err)
+		}
+		close(lines)
+	}()
+
+	for {
+		select {
+		case <-peerGone:
+			return
+		case line, ok := <-lines:
+			if !ok {
+				return // local stdin closed (Ctrl-D)
+			}
+			if _, err := fmt.Fprintln(stream, line); err != nil {
+				log.Println("stream write:", err)
+				return
+			}
+		}
 	}
 }
 
@@ -120,8 +148,11 @@ func main() {
 
 	// Mode 1: a room → find a peer via signaling, punch a hole, then chat.
 	if *room != "" {
-		ctx := context.Background()
-		sigConn, err := core.Register(ctx, *signalURL, *room, publicAddr.String(), core.Fingerprint(pub))
+		// Bound the whole signaling exchange so we don't wait forever if no peer
+		// ever joins the room.
+		sigCtx, sigCancel := context.WithTimeout(context.Background(), 60*time.Second)
+		defer sigCancel()
+		sigConn, err := core.Register(sigCtx, *signalURL, *room, publicAddr.String(), core.Fingerprint(pub))
 		if err != nil {
 			log.Fatal(err)
 		}
@@ -129,8 +160,8 @@ func main() {
 
 		// Wait for the server's introduction (a "peer" message).
 		var intro core.Message
-		if err := wsjson.Read(ctx, sigConn, &intro); err != nil {
-			log.Fatal("waiting for peer: ", err)
+		if err := wsjson.Read(sigCtx, sigConn, &intro); err != nil {
+			log.Fatalf("no peer joined room %q within 60s: %v", *room, err)
 		}
 		sigConn.Close(websocket.StatusNormalClosure, "")
 		if intro.Type != "peer" || intro.Addr == "" {
@@ -177,13 +208,13 @@ func main() {
 		}
 		hsCtx, cancel := context.WithTimeout(context.Background(), 15*time.Second)
 		defer cancel()
-		secureConn, dialed, err := core.SecureChannel(hsCtx, conn, publicAddr.String(), intro.Addr, cert, pinnedKey)
+		session, err := core.SecureChannel(hsCtx, conn, intro.Addr, cert, pinnedKey, intro.Listen)
 		if err != nil {
 			log.Fatal("secure channel: ", err)
 		}
-		defer secureConn.CloseWithError(0, "bye")
+		defer session.Close()
 
-		state := secureConn.ConnectionState().TLS
+		state := session.Conn.ConnectionState().TLS
 		fmt.Println("secure channel established:")
 		fmt.Println("  TLS version: ", tls.VersionName(state.Version))
 		fmt.Println("  cipher suite:", tls.CipherSuiteName(state.CipherSuite))
@@ -193,8 +224,10 @@ func main() {
 			}
 		}
 
-		// Open the one chat stream and talk over the encrypted connection.
-		stream, err := core.OpenChatStream(hsCtx, secureConn, dialed)
+		// Open the one chat stream (its own timeout, separate from the handshake).
+		streamCtx, streamCancel := context.WithTimeout(context.Background(), 10*time.Second)
+		defer streamCancel()
+		stream, err := session.OpenChatStream(streamCtx)
 		if err != nil {
 			log.Fatal("open chat stream: ", err)
 		}
