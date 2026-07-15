@@ -43,14 +43,19 @@ func chatStream(stream io.ReadWriter) {
 	peerGone := make(chan struct{})
 	go func() {
 		defer close(peerGone)
-		scanner := bufio.NewScanner(stream)
-		for scanner.Scan() {
-			fmt.Println("peer:", scanner.Text())
-		}
-		if err := scanner.Err(); err != nil {
-			log.Println("peer stream closed:", err)
-		} else {
-			fmt.Println("peer disconnected.")
+		for {
+			frame, err := core.ReadFrame(stream)
+			if err != nil {
+				if errors.Is(err, io.EOF) {
+					fmt.Println("peer disconnected.")
+				} else {
+					log.Println("peer stream closed:", err)
+				}
+				return
+			}
+			if frame.Type == core.MsgChat {
+				fmt.Printf("peer: %s\n", frame.Payload)
+			}
 		}
 	}()
 
@@ -74,7 +79,7 @@ func chatStream(stream io.ReadWriter) {
 			if !ok {
 				return // local stdin closed (Ctrl-D)
 			}
-			if _, err := fmt.Fprintln(stream, line); err != nil {
+			if err := core.WriteFrame(stream, core.Frame{Type: core.MsgChat, Payload: []byte(line)}); err != nil {
 				log.Println("stream write:", err)
 				return
 			}
