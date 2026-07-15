@@ -8,6 +8,7 @@ import (
 	"encoding/hex"
 	"flag"
 	"fmt"
+	"io"
 	"log"
 	"net"
 	"os"
@@ -27,6 +28,29 @@ func receive(conn *net.UDPConn) {
 			log.Fatal(err)
 		}
 		fmt.Printf("[%s] %s\n", from, buf[:n])
+	}
+}
+
+// chatStream runs the two-way text chat over an encrypted QUIC stream: a reader
+// goroutine prints incoming lines while the main loop sends what you type.
+func chatStream(stream io.ReadWriter) {
+	go func() {
+		scanner := bufio.NewScanner(stream)
+		for scanner.Scan() {
+			fmt.Println("peer:", scanner.Text())
+		}
+		if err := scanner.Err(); err != nil {
+			log.Println("peer stream closed:", err)
+		}
+	}()
+	scanner := bufio.NewScanner(os.Stdin)
+	for scanner.Scan() {
+		if _, err := fmt.Fprintln(stream, scanner.Text()); err != nil {
+			log.Fatal("stream write: ", err)
+		}
+	}
+	if err := scanner.Err(); err != nil {
+		log.Fatal("stdin: ", err)
 	}
 }
 
@@ -153,7 +177,7 @@ func main() {
 		}
 		hsCtx, cancel := context.WithTimeout(context.Background(), 15*time.Second)
 		defer cancel()
-		secureConn, err := core.SecureChannel(hsCtx, conn, publicAddr.String(), intro.Addr, cert, pinnedKey)
+		secureConn, dialed, err := core.SecureChannel(hsCtx, conn, publicAddr.String(), intro.Addr, cert, pinnedKey)
 		if err != nil {
 			log.Fatal("secure channel: ", err)
 		}
@@ -168,6 +192,14 @@ func main() {
 				fmt.Println("  peer identity:", core.Fingerprint(peerPub))
 			}
 		}
+
+		// Open the one chat stream and talk over the encrypted connection.
+		stream, err := core.OpenChatStream(hsCtx, secureConn, dialed)
+		if err != nil {
+			log.Fatal("open chat stream: ", err)
+		}
+		fmt.Println("connected! type a message and press enter:")
+		chatStream(stream)
 		return
 	}
 

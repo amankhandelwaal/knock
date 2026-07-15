@@ -7,6 +7,7 @@ import (
 	"crypto/x509"
 	"errors"
 	"fmt"
+	"io"
 	"net"
 
 	"github.com/quic-go/quic-go"
@@ -24,7 +25,7 @@ const alpn = "knock/1"
 // deterministically: the peer with the lexicographically smaller public address
 // listens, the other dials. Both sides compute this identically, so no extra
 // round-trip is needed to agree on roles.
-func SecureChannel(ctx context.Context, conn *net.UDPConn, localAddr, peerAddr string, cert tls.Certificate, expectedKey ed25519.PublicKey) (*quic.Conn, error) {
+func SecureChannel(ctx context.Context, conn *net.UDPConn, localAddr, peerAddr string, cert tls.Certificate, expectedKey ed25519.PublicKey) (*quic.Conn, bool, error) {
 	tr := &quic.Transport{Conn: conn}
 
 	tlsConf := &tls.Config{
@@ -43,10 +44,14 @@ func SecureChannel(ctx context.Context, conn *net.UDPConn, localAddr, peerAddr s
 	}
 	quicConf := &quic.Config{}
 
+	// Return whether we dialed, so the caller knows to open (dialer) or accept
+	// (listener) the chat stream.
 	if localAddr < peerAddr {
-		return accept(ctx, tr, tlsConf, quicConf)
+		qc, err := accept(ctx, tr, tlsConf, quicConf)
+		return qc, false, err
 	}
-	return dial(ctx, tr, peerAddr, tlsConf, quicConf)
+	qc, err := dial(ctx, tr, peerAddr, tlsConf, quicConf)
+	return qc, true, err
 }
 
 // dial is the client half: reach out to the peer and run the QUIC handshake.
@@ -100,4 +105,35 @@ func pinKey(expected ed25519.PublicKey) func(rawCerts [][]byte, verifiedChains [
 		}
 		return nil
 	}
+}
+
+// streamHello is a single byte the dialer writes right after opening the chat
+// stream. QUIC streams are lazy — a freshly opened stream stays invisible to
+// the peer until a byte is sent — so this nudge makes the listener's
+// AcceptStream return even before anyone has typed anything.
+const streamHello = 'K'
+
+// OpenChatStream returns the one bidirectional stream both peers talk over. The
+// dialer opens it and sends streamHello; the listener accepts it and discards
+// that byte. After this the stream is used symmetrically by both sides.
+func OpenChatStream(ctx context.Context, conn *quic.Conn, dialed bool) (*quic.Stream, error) {
+	if dialed {
+		s, err := conn.OpenStreamSync(ctx)
+		if err != nil {
+			return nil, fmt.Errorf("open stream: %w", err)
+		}
+		if _, err := s.Write([]byte{streamHello}); err != nil {
+			return nil, fmt.Errorf("send stream hello: %w", err)
+		}
+		return s, nil
+	}
+	s, err := conn.AcceptStream(ctx)
+	if err != nil {
+		return nil, fmt.Errorf("accept stream: %w", err)
+	}
+	var b [1]byte
+	if _, err := io.ReadFull(s, b[:]); err != nil {
+		return nil, fmt.Errorf("read stream hello: %w", err)
+	}
+	return s, nil
 }
