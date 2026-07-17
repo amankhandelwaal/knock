@@ -1,4 +1,4 @@
-// Package core holds Knock's reusable networking — opening sockets, STUN
+// Package core holds Knock's reusable networking: opening sockets, STUN
 // address discovery, the NAT hole-punch, the QUIC session, and the wire
 // protocol. It deals in sessions and packets, never in chat-level concepts.
 package core
@@ -14,7 +14,7 @@ import (
 // DiscoverPublicAddr asks a STUN server what public IP:port the outside world
 // sees for conn's socket, and returns that address.
 //
-// It sends and receives on the SAME socket the caller passes in, because a
+// It sends and receives on the same socket the caller passes in, because a
 // NAT's public mapping is tied to one specific socket. The address reported
 // here is therefore the one a peer can actually use to reach this socket.
 func DiscoverPublicAddr(conn *net.UDPConn, stunServer string) (*net.UDPAddr, error) {

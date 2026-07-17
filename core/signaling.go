@@ -17,7 +17,7 @@ type Message struct {
 	Listen bool   `json:"listen,omitempty"` // in a "peer" intro: should the recipient listen (vs dial)?
 }
 
-// Register dials the signaling server over WebSocket and announces this peer —
+// Register dials the signaling server over WebSocket and announces this peer:
 // its rendezvous room, its public address, and its identity fingerprint. It
 // returns the open connection so the caller can keep listening for the server
 // to introduce the other peer.

@@ -23,7 +23,7 @@ type peer struct {
 // connection runs in its own goroutine and they all share this one map.
 type hub struct {
 	mu    sync.Mutex
-	rooms map[string]*peer // room → the peer already waiting (1-to-1 for now)
+	rooms map[string]*peer // room name to the peer already waiting there (1-to-1 for now)
 }
 
 func newHub() *hub {
@@ -44,7 +44,7 @@ func (h *hub) join(room string, p *peer) *peer {
 	return nil
 }
 
-// leave removes p from the room, but only if it is still the one waiting there —
+// leave removes p from the room, but only if it is still the one waiting there,
 // so a peer that disconnects before being paired is cleaned up, while a peer
 // that already paired (its room entry taken by join) or a later, different
 // waiter is left untouched.
@@ -92,8 +92,8 @@ func main() {
 		if other == nil {
 			log.Printf("room %q: waiting for a second peer", msg.Room)
 		} else {
-			// Two peers share the room — introduce them, relaying each one's
-			// address AND identity fingerprint so the other can pin it (TOFU).
+			// Two peers share the room, so introduce them, relaying each one's
+			// address and identity fingerprint so the other can pin it (TOFU).
 			// We also assign roles: `other` was already waiting, so it listens;
 			// `me` just joined, so it dials. Server-assigned roles avoid any
 			// address-tiebreaker ambiguity and hold even if the peers' pins differ.

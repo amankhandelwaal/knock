@@ -14,14 +14,13 @@ import (
 	"github.com/quic-go/quic-go"
 )
 
-// alpn is the application-protocol name negotiated during the TLS handshake.
-// QUIC mandates ALPN, so both peers must agree on the same string or the
-// handshake fails.
+// alpn is the ALPN protocol name sent during the TLS handshake. QUIC requires
+// ALPN, so both peers must use the same string or the handshake fails.
 const alpn = "knock/1"
 
-// keepAlivePeriod holds the NAT mapping open (below the typical UDP timeout) and
-// gives timely liveness detection; maxIdleTimeout bounds a half-open session.
-// See DECISIONS §1/§3 — both are set explicitly rather than left to defaults.
+// keepAlivePeriod keeps the NAT mapping open (it sits below the typical UDP
+// timeout) and detects a dead peer; maxIdleTimeout bounds a half-open session.
+// Both are set explicitly rather than left to quic-go's defaults (DECISIONS 1/3).
 const (
 	keepAlivePeriod = 15 * time.Second
 	maxIdleTimeout  = 30 * time.Second
@@ -37,13 +36,12 @@ type Session struct {
 }
 
 // SecureChannel upgrades an already-punched UDP socket to an encrypted QUIC
-// connection with the peer, pinned to expectedKey. A pinned key is REQUIRED —
-// without one we refuse rather than form an unauthenticated channel, so the
-// connection can never silently downgrade. TLS is asymmetric (one side dials,
-// one listens); which role we take is decided by the signaling server (the peer
-// already waiting in the room listens, the one that just joined dials) and
-// passed in as `listen`, so there is no address tie or race to resolve here —
-// and both peers agree on roles even if their pinned keys disagree.
+// connection with the peer, pinned to expectedKey. A pinned key is required:
+// with none we refuse rather than form an unauthenticated channel, so the
+// connection can never silently downgrade. The dial/listen role is decided by
+// the signaling server (the peer already waiting listens, the joiner dials) and
+// passed in as listen, so there is no address tiebreaker to resolve and both
+// peers agree on roles even when their pinned keys disagree.
 func SecureChannel(ctx context.Context, conn *net.UDPConn, peerAddr string, cert tls.Certificate, expectedKey ed25519.PublicKey, listen bool) (*Session, error) {
 	if expectedKey == nil {
 		return nil, errors.New("secure channel: a pinned peer key is required")
@@ -58,13 +56,12 @@ func SecureChannel(ctx context.Context, conn *net.UDPConn, peerAddr string, cert
 
 	tr := &quic.Transport{Conn: conn}
 
+	// TLS's own chain check is useless here (self-signed, no CA), so disable it
+	// and pin the peer's key in the callback instead. The callback runs on both
+	// sides, so pinning is mutual and a mismatch fails the handshake closed.
 	tlsConf := &tls.Config{
-		Certificates: []tls.Certificate{cert}, // present our identity cert
-		NextProtos:   []string{alpn},          // ALPN — mandatory for QUIC
-		// TLS's own chain check is useless to us (self-signed, no CA), so we
-		// turn it off and do our OWN check instead: pin the peer's key. The
-		// callback runs on both sides (client checks server, server checks
-		// client), so pinning is mutual and the handshake fails closed.
+		Certificates:          []tls.Certificate{cert},
+		NextProtos:            []string{alpn},
 		InsecureSkipVerify:    true,
 		ClientAuth:            tls.RequireAnyClientCert,
 		VerifyPeerCertificate: pinKey(expectedKey),
@@ -82,7 +79,7 @@ func SecureChannel(ctx context.Context, conn *net.UDPConn, peerAddr string, cert
 		qc, err = dial(ctx, tr, peerAddr, tlsConf, quicConf)
 	}
 	if err != nil {
-		tr.Close() // release the transport's goroutines + socket ownership on failure
+		tr.Close() // release the transport's goroutines and socket ownership on failure
 		return nil, err
 	}
 	return &Session{Conn: qc, transport: tr, dialed: !listen}, nil
@@ -90,8 +87,8 @@ func SecureChannel(ctx context.Context, conn *net.UDPConn, peerAddr string, cert
 
 // Close tears down the connection and the transport. Closing the transport stops
 // its background goroutines and releases its ownership of the UDP socket; it does
-// not close the socket itself (we handed it an existing one), so the caller still
-// owns closing that.
+// not close the socket itself (we handed it an existing one), so closing that
+// stays with the caller.
 func (s *Session) Close() error {
 	s.Conn.CloseWithError(0, "bye")
 	return s.transport.Close()
@@ -111,8 +108,8 @@ func dial(ctx context.Context, tr *quic.Transport, peerAddr string, tlsConf *tls
 }
 
 // accept is the server half: listen on the shared socket and take the one
-// incoming connection our peer dials. We only ever want one connection, so the
-// listener is closed as soon as we have it (the accepted connection survives it).
+// incoming connection the peer dials. We only want one connection, so the
+// listener is closed as soon as we have it (the accepted connection outlives it).
 func accept(ctx context.Context, tr *quic.Transport, tlsConf *tls.Config, quicConf *quic.Config) (*quic.Conn, error) {
 	ln, err := tr.Listen(tlsConf, quicConf)
 	if err != nil {
@@ -126,11 +123,11 @@ func accept(ctx context.Context, tr *quic.Transport, tlsConf *tls.Config, quicCo
 	return qc, nil
 }
 
-// pinKey returns a TLS verification callback that accepts the peer ONLY if the
-// key in the certificate it presents is exactly expected. Because we set
-// InsecureSkipVerify, TLS's built-in validation is off and verifiedChains is
-// always nil — so we parse the raw certificate ourselves. Returning a non-nil
-// error aborts the handshake: that is the "fail closed" that makes pinning safe.
+// pinKey returns a TLS verification callback that accepts the peer only if the
+// key in its certificate exactly matches expected. InsecureSkipVerify turns off
+// TLS's built-in validation (so verifiedChains is always nil), so we parse the
+// raw certificate ourselves. Returning an error aborts the handshake: the "fail
+// closed" that makes pinning safe.
 func pinKey(expected ed25519.PublicKey) func(rawCerts [][]byte, verifiedChains [][]*x509.Certificate) error {
 	return func(rawCerts [][]byte, _ [][]*x509.Certificate) error {
 		if len(rawCerts) == 0 {
@@ -153,9 +150,9 @@ func pinKey(expected ed25519.PublicKey) func(rawCerts [][]byte, verifiedChains [
 }
 
 // streamHello is a single byte the dialer writes right after opening the chat
-// stream. QUIC streams are lazy — a freshly opened stream stays invisible to
-// the peer until a byte is sent — so this nudge makes the listener's
-// AcceptStream return even before anyone has typed anything.
+// stream. QUIC streams are lazy: a freshly opened stream is invisible to the peer
+// until a byte is sent, so this nudge makes the listener's AcceptStream return
+// before anyone has typed.
 const streamHello = 'K'
 
 // OpenChatStream returns the one bidirectional stream both peers talk over. The

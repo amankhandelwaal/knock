@@ -8,7 +8,7 @@ import (
 	"os"
 )
 
-// LoadOrCreateIdentity returns this device's long-term ed25519 signing key — its
+// LoadOrCreateIdentity returns this device's long-term ed25519 signing key, its
 // permanent identity. On first run it generates one and saves it to path; on
 // later runs it loads the same one, so the public key (what peers pin) stays
 // stable. The private key lives only in that file, never leaving the device.
@@ -24,7 +24,7 @@ func LoadOrCreateIdentity(path string) (ed25519.PrivateKey, error) {
 		return nil, fmt.Errorf("read identity %q: %w", path, err)
 	}
 
-	// No key yet — generate a fresh one and save it with owner-only permissions.
+	// No key yet, so generate a fresh one and save it with owner-only permissions.
 	_, priv, err := ed25519.GenerateKey(rand.Reader)
 	if err != nil {
 		return nil, fmt.Errorf("generate identity: %w", err)
@@ -35,7 +35,7 @@ func LoadOrCreateIdentity(path string) (ed25519.PrivateKey, error) {
 	return priv, nil
 }
 
-// Fingerprint is a stable, human-readable form of a public key — the string
+// Fingerprint is a stable, human-readable form of a public key: the string
 // you'd compare out-of-band to verify a contact is who they claim.
 func Fingerprint(pub ed25519.PublicKey) string {
 	return hex.EncodeToString(pub)

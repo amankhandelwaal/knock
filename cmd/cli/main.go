@@ -112,7 +112,6 @@ func main() {
 	peerKeyHex := flag.String("peer-key", "", "expected peer identity fingerprint (hex) to pin; refuses the connection on mismatch")
 	flag.Parse()
 
-	// Load (or create on first run) this device's long-term identity.
 	identity, err := core.LoadOrCreateIdentity(*identityPath)
 	if err != nil {
 		log.Fatal(err)
@@ -144,14 +143,14 @@ func main() {
 	defer conn.Close()
 	fmt.Println("listening on", conn.LocalAddr())
 
-	// Discover our public address via STUN — on this same socket.
+	// Discover our public address via STUN, on this same socket.
 	publicAddr, err := core.DiscoverPublicAddr(conn, *stunServer)
 	if err != nil {
 		log.Fatal(err)
 	}
 	fmt.Println("public address:", publicAddr)
 
-	// Mode 1: a room → find a peer via signaling, punch a hole, then chat.
+	// Mode 1: a room. Find a peer via signaling, punch a hole, then chat.
 	if *room != "" {
 		// Bound the whole signaling exchange so we don't wait forever if no peer
 		// ever joins the room.
@@ -161,9 +160,8 @@ func main() {
 		if err != nil {
 			log.Fatal(err)
 		}
-		fmt.Printf("registered (room=%q) — waiting for a peer...\n", *room)
+		fmt.Printf("registered (room=%q), waiting for a peer...\n", *room)
 
-		// Wait for the server's introduction (a "peer" message).
 		var intro core.Message
 		if err := wsjson.Read(sigCtx, sigConn, &intro); err != nil {
 			log.Fatalf("no peer joined room %q within 60s: %v", *room, err)
@@ -178,7 +176,7 @@ func main() {
 		// is enforced; otherwise fall back to trust-on-first-use (TOFU): pin
 		// whatever key the signaling server relayed. Either way we print the
 		// fingerprint so it can be checked out-of-band (the Signal "safety
-		// number" idea) — TOFU trusts the server, so that check is how you catch
+		// number" idea). TOFU trusts the server, so that check is how you catch
 		// a server that lied.
 		pinnedKey := expectedKey
 		if pinnedKey == nil {
@@ -187,7 +185,7 @@ func main() {
 				log.Fatalf("no -peer-key set and signaling gave no usable key (got %q)", intro.Key)
 			}
 			pinnedKey = ed25519.PublicKey(raw)
-			fmt.Println("TOFU — pinning peer key from signaling:", intro.Key, "(verify out-of-band!)")
+			fmt.Println("TOFU: pinning peer key from signaling:", intro.Key, "(verify out-of-band!)")
 		} else {
 			if intro.Key != "" && intro.Key != core.Fingerprint(expectedKey) {
 				fmt.Printf("WARNING: signaling advertised %s but enforcing your -peer-key %s\n",
@@ -205,7 +203,7 @@ func main() {
 		if err := core.Punch(conn, remoteAddr); err != nil {
 			log.Fatal(err)
 		}
-		fmt.Println("punched — upgrading to an encrypted QUIC channel...")
+		fmt.Println("punched, upgrading to an encrypted QUIC channel...")
 
 		cert, err := core.SelfSignedCert(identity)
 		if err != nil {
@@ -241,7 +239,7 @@ func main() {
 		return
 	}
 
-	// Mode 2: a direct peer address → just chat, no signaling (Stage 0).
+	// Mode 2: a direct peer address. Just chat, no signaling (Stage 0).
 	if *peerAddr != "" {
 		remoteAddr, err := net.ResolveUDPAddr("udp", *peerAddr)
 		if err != nil {
@@ -253,5 +251,5 @@ func main() {
 		return
 	}
 
-	// Mode 3: neither → we only did address discovery. Done.
+	// Mode 3: neither, so we only did address discovery. Done.
 }

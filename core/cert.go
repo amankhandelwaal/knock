@@ -11,7 +11,7 @@ import (
 	"time"
 )
 
-// SelfSignedCert builds a TLS certificate whose public key IS this device's
+// SelfSignedCert builds a TLS certificate whose public key is this device's
 // identity, self-signed by the identity's private key. There is no CA: the peer
 // trusts it by pinning the key it carries, not by a certificate chain.
 func SelfSignedCert(identity ed25519.PrivateKey) (tls.Certificate, error) {
@@ -21,11 +21,11 @@ func SelfSignedCert(identity ed25519.PrivateKey) (tls.Certificate, error) {
 		SerialNumber: big.NewInt(1),
 		Subject:      pkix.Name{CommonName: "knock"},
 		NotBefore:    time.Now().Add(-time.Hour),
-		NotAfter:     time.Now().Add(365 * 24 * time.Hour), // ~1 year; cosmetic — we verify by the pinned key, not expiry
+		NotAfter:     time.Now().Add(365 * 24 * time.Hour), // ~1 year; cosmetic. We verify by the pinned key, not expiry
 	}
 
-	// parent == template makes it self-signed: pub goes INTO the cert, and the
-	// identity's private key SIGNS it.
+	// parent == template makes it self-signed: the public key goes into the cert,
+	// and the identity's private key signs it.
 	der, err := x509.CreateCertificate(rand.Reader, template, template, pub, identity)
 	if err != nil {
 		return tls.Certificate{}, fmt.Errorf("create certificate: %w", err)
