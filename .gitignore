@@ -5,6 +5,7 @@
 *.so
 *.dylib
 /bin/
+/dist/
 /knock
 /knock-cli
 /knock-signal
@@ -21,6 +22,7 @@ go.work.sum
 # Secrets / local config
 .env
 *.local
+*.key
 
 # OS / editor cruft
 .DS_Store

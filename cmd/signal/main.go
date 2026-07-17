@@ -16,13 +16,14 @@ import (
 type peer struct {
 	conn *websocket.Conn
 	addr string // its public IP:port, discovered via STUN
+	key  string // its identity fingerprint (hex), relayed to the other peer for TOFU
 }
 
 // hub tracks who is waiting in each room. Safe for concurrent use because every
 // connection runs in its own goroutine and they all share this one map.
 type hub struct {
 	mu    sync.Mutex
-	rooms map[string]*peer // room → the peer already waiting (1-to-1 for now)
+	rooms map[string]*peer // room name to the peer already waiting there (1-to-1 for now)
 }
 
 func newHub() *hub {
@@ -41,6 +42,18 @@ func (h *hub) join(room string, p *peer) *peer {
 	}
 	h.rooms[room] = p
 	return nil
+}
+
+// leave removes p from the room, but only if it is still the one waiting there,
+// so a peer that disconnects before being paired is cleaned up, while a peer
+// that already paired (its room entry taken by join) or a later, different
+// waiter is left untouched.
+func (h *hub) leave(room string, p *peer) {
+	h.mu.Lock()
+	defer h.mu.Unlock()
+	if h.rooms[room] == p {
+		delete(h.rooms, room)
+	}
 }
 
 func main() {
@@ -72,18 +85,23 @@ func main() {
 		}
 		log.Printf("registered: room=%q addr=%s", msg.Room, msg.Addr)
 
-		me := &peer{conn: conn, addr: msg.Addr}
+		me := &peer{conn: conn, addr: msg.Addr, key: msg.Key}
 		other := h.join(msg.Room, me)
+		defer h.leave(msg.Room, me) // clean up if we disconnect while still waiting
 
 		if other == nil {
 			log.Printf("room %q: waiting for a second peer", msg.Room)
 		} else {
-			// Two peers share the room — introduce them to each other.
+			// Two peers share the room, so introduce them, relaying each one's
+			// address and identity fingerprint so the other can pin it (TOFU).
+			// We also assign roles: `other` was already waiting, so it listens;
+			// `me` just joined, so it dials. Server-assigned roles avoid any
+			// address-tiebreaker ambiguity and hold even if the peers' pins differ.
 			log.Printf("room %q: pairing %s <-> %s", msg.Room, me.addr, other.addr)
-			if err := wsjson.Write(ctx, me.conn, core.Message{Type: "peer", Addr: other.addr}); err != nil {
+			if err := wsjson.Write(ctx, me.conn, core.Message{Type: "peer", Addr: other.addr, Key: other.key, Listen: false}); err != nil {
 				log.Println("introduce (me):", err)
 			}
-			if err := wsjson.Write(ctx, other.conn, core.Message{Type: "peer", Addr: me.addr}); err != nil {
+			if err := wsjson.Write(ctx, other.conn, core.Message{Type: "peer", Addr: me.addr, Key: me.key, Listen: true}); err != nil {
 				log.Println("introduce (other):", err)
 			}
 		}
