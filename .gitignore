@@ -5,6 +5,7 @@
 *.so
 *.dylib
 /bin/
+/dist/
 /knock
 /knock-cli
 /knock-signal
