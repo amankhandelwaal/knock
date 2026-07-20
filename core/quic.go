@@ -35,14 +35,14 @@ type Session struct {
 	dialed    bool
 }
 
-// SecureChannel upgrades an already-punched UDP socket to an encrypted QUIC
-// connection with the peer, pinned to expectedKey. A pinned key is required:
+// SecureChannel upgrades a UDP path (a punched direct socket or an allocated
+// TURN relay) to an encrypted QUIC connection with the peer, pinned to expectedKey. A pinned key is required:
 // with none we refuse rather than form an unauthenticated channel, so the
 // connection can never silently downgrade. The dial/listen role is decided by
 // the signaling server (the peer already waiting listens, the joiner dials) and
 // passed in as listen, so there is no address tiebreaker to resolve and both
 // peers agree on roles even when their pinned keys disagree.
-func SecureChannel(ctx context.Context, conn *net.UDPConn, peerAddr string, cert tls.Certificate, expectedKey ed25519.PublicKey, listen bool) (*Session, error) {
+func SecureChannel(ctx context.Context, conn net.PacketConn, peerAddr string, cert tls.Certificate, expectedKey ed25519.PublicKey, listen bool) (*Session, error) {
 	if expectedKey == nil {
 		return nil, errors.New("secure channel: a pinned peer key is required")
 	}
