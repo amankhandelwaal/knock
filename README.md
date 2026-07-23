@@ -45,23 +45,44 @@ Needs Go 1.25+. Start the signaling server somewhere both peers can reach:
 go run ./cmd/signal            # listens on :4000
 ```
 
-Then each peer joins the same room:
+For relay fallback, also start a TURN server on a publicly reachable host. Its
+firewall must allow UDP port 3478 and the relay range you choose:
 
 ```
-go run ./cmd/cli -room our-code -signal ws://<signal-host>:4000
+go run ./cmd/turn -addr :3478 -public-ip <public-turn-ip> \
+  -user demo:change-me -min-port 49152 -max-port 49200
+```
+
+Then each peer joins the same room. Supplying the TURN flags reserves a backup
+relay address; Knock still prefers the direct path whenever the punch works:
+
+```
+go run ./cmd/cli -room our-code -signal ws://<signal-host>:4000 \
+  -turn <turn-host>:3478 -turn-user demo -turn-password change-me
 ```
 
 On one machine or a shared LAN, `<signal-host>` is just that machine's address. Across different networks the server has to be reachable publicly, so run it on a small host or behind a tunnel (cloudflared, ngrok) that both peers can point at.
 
-The first run writes an identity key file (`knock-identity.key`); the printed fingerprint is what the other side verifies. To exercise just the transport without signaling, point one peer straight at another with `-peer host:port`.
+To deliberately exercise the relay path, add `-force-relay` to either peer's
+command. The server will choose relay for both peers. The first run writes an
+identity key file (`knock-identity.key`); the printed fingerprint is what the
+other side verifies. To exercise just the transport without signaling, point one peer straight at another with `-peer host:port`.
 
-Other flags: `-listen` (local UDP port), `-stun` (STUN server, defaults to Google's), `-identity` (key file path), `-peer-key` (pin the peer's fingerprint).
+Other flags: `-listen` (local UDP port), `-stun` (STUN server, defaults to Google's), `-identity` (key file path), `-peer-key` (pin the peer's fingerprint), `-turn-realm` (defaults to `knock`).
 
 ## Where it stands
 
-Implemented: STUN discovery, room-based signaling, UDP hole punching, ed25519 identity, the QUIC/TLS-1.3 channel, length-prefixed message framing, and TOFU / pinned-key trust. Enough to bring the channel up between two peers and run traffic over it.
+Implemented: STUN discovery, room-based signaling, validated UDP hole punching,
+ed25519 identity, the QUIC/TLS-1.3 channel, length-prefixed message framing,
+and TURN fallback. Both peers report their direct-punch result to signaling and
+make the same direct-or-relay decision; QUIC runs over either `PacketConn`.
+TURN relays encrypted packets but necessarily sees the peers' IP metadata.
 
-Not built yet: the signaling server is dev-grade (one pair per room, WebSocket origin checks off for local use), there's no store-and-forward for offline peers or relay fallback for NATs that refuse to punch, and the demo is a single stream between two peers. Those are directions, not claims.
+Still to validate or build: the signaling server is dev-grade (one pair per
+room, WebSocket origin checks off for local use), the relay path needs a
+two-real-network benchmark, and first-contact trust is session-only unless
+`-peer-key` is supplied. Persistent contacts, invite/QR onboarding,
+store-and-forward, and multi-stream/file support are future stages.
 
 ## Built with
 

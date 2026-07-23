@@ -14,6 +14,8 @@ func main() {
 	realm := flag.String("realm", "knock", "TURN realm")
 	cred := flag.String("user", "knock:knock", "TURN credential as username:password")
 	publicIP := flag.String("public-ip", "127.0.0.1", "public IP the relay advertises to clients")
+	minPort := flag.Uint("min-port", 49152, "first UDP relay port to allocate")
+	maxPort := flag.Uint("max-port", 49200, "last UDP relay port to allocate")
 	flag.Parse()
 
 	username, password, ok := strings.Cut(*cred, ":")
@@ -23,6 +25,9 @@ func main() {
 	relayIP := net.ParseIP(*publicIP)
 	if relayIP == nil {
 		log.Fatalf("invalid -public-ip: %q", *publicIP)
+	}
+	if *minPort == 0 || *minPort > *maxPort || *maxPort > 65535 {
+		log.Fatalf("invalid relay port range: %d-%d", *minPort, *maxPort)
 	}
 
 	conn, err := net.ListenPacket("udp", *addr)
@@ -44,8 +49,11 @@ func main() {
 		},
 		PacketConnConfigs: []turn.PacketConnConfig{{
 			PacketConn: conn,
-			RelayAddressGenerator: &turn.RelayAddressGeneratorStatic{
-				RelayAddress: relayIP,    // the address handed back to clients
+			RelayAddressGenerator: &turn.RelayAddressGeneratorPortRange{
+				RelayAddress: relayIP, // the address handed back to clients
+				MinPort:      uint16(*minPort),
+				MaxPort:      uint16(*maxPort),
+				MaxRetries:   100,
 				Address:      "0.0.0.0", // bind the relay sockets on all interfaces
 			},
 		}},
@@ -55,6 +63,7 @@ func main() {
 	}
 	defer server.Close()
 
-	log.Printf("TURN server listening on %s (realm=%q, public-ip=%s)", *addr, *realm, *publicIP)
+	log.Printf("TURN server listening on %s (realm=%q, public-ip=%s, relay-ports=%d-%d)",
+		*addr, *realm, *publicIP, *minPort, *maxPort)
 	select {} // serve until the process is killed
 }

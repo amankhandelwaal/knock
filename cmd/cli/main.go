@@ -106,6 +106,11 @@ func main() {
 	listenPort := flag.String("listen", "9000", "local UDP port to listen on")
 	peerAddr := flag.String("peer", "", "peer's address as host:port (skip signaling, connect directly)")
 	stunServer := flag.String("stun", "stun.l.google.com:19302", "STUN server for public-address discovery")
+	turnServer := flag.String("turn", "", "TURN server as host:port (enables relay fallback preparation)")
+	turnUsername := flag.String("turn-user", "", "TURN username")
+	turnPassword := flag.String("turn-password", "", "TURN password")
+	turnRealm := flag.String("turn-realm", "knock", "TURN authentication realm")
+	forceRelay := flag.Bool("force-relay", false, "skip direct punching and test TURN relay fallback (requires -turn)")
 	signalURL := flag.String("signal", "ws://localhost:4000", "signaling server URL")
 	room := flag.String("room", "", "rendezvous room code to find your peer")
 	identityPath := flag.String("identity", "knock-identity.key", "path to this device's identity key file")
@@ -150,13 +155,32 @@ func main() {
 	}
 	fmt.Println("public address:", publicAddr)
 
+	// Reserve a backup public address before signaling. This does not route any
+	// chat traffic through TURN yet; it only gives the peer an address to use if
+	// the direct hole-punch later fails. With -turn omitted, Knock stays in its
+	// existing direct-only mode.
+	var relay *core.Relay
+	relayAddr := ""
+	if *turnServer != "" {
+		if *turnUsername == "" || *turnPassword == "" {
+			log.Fatal("-turn requires both -turn-user and -turn-password")
+		}
+		relay, err = core.Allocate(*turnServer, *turnUsername, *turnPassword, *turnRealm)
+		if err != nil {
+			log.Fatal("allocate TURN relay: ", err)
+		}
+		defer relay.Close()
+		relayAddr = relay.Addr().String()
+		fmt.Println("relay address:", relayAddr)
+	}
+
 	// Mode 1: a room. Find a peer via signaling, punch a hole, then chat.
 	if *room != "" {
 		// Bound the whole signaling exchange so we don't wait forever if no peer
 		// ever joins the room.
 		sigCtx, sigCancel := context.WithTimeout(context.Background(), 60*time.Second)
 		defer sigCancel()
-		sigConn, err := core.Register(sigCtx, *signalURL, *room, publicAddr.String(), core.Fingerprint(pub))
+		sigConn, err := core.Register(sigCtx, *signalURL, *room, publicAddr.String(), core.Fingerprint(pub), relayAddr)
 		if err != nil {
 			log.Fatal(err)
 		}
@@ -166,7 +190,6 @@ func main() {
 		if err := wsjson.Read(sigCtx, sigConn, &intro); err != nil {
 			log.Fatalf("no peer joined room %q within 60s: %v", *room, err)
 		}
-		sigConn.Close(websocket.StatusNormalClosure, "")
 		if intro.Type != "peer" || intro.Addr == "" {
 			log.Fatalf("unexpected signaling message: %q", intro.Type)
 		}
@@ -194,16 +217,71 @@ func main() {
 			fmt.Println("pinning peer key (-peer-key):", core.Fingerprint(expectedKey))
 		}
 
-		// Punch a hole to the peer, then upgrade the socket to encrypted QUIC.
+		// Try the direct route first. Each peer reports its own outcome to
+		// signaling; signaling waits for both before choosing the shared route.
 		remoteAddr, err := net.ResolveUDPAddr("udp", intro.Addr)
 		if err != nil {
 			log.Fatal(err)
 		}
-		fmt.Println("punching...")
-		if err := core.Punch(conn, remoteAddr); err != nil {
-			log.Fatal(err)
+		var punchErr error
+		if *forceRelay {
+			if relay == nil {
+				log.Fatal("-force-relay requires -turn")
+			}
+			punchErr = errors.New("direct punch skipped by -force-relay")
+			fmt.Println("skipping direct punch to test TURN relay fallback...")
+		} else {
+			fmt.Println("punching...")
+			punchErr = core.Punch(conn, remoteAddr)
 		}
-		fmt.Println("punched, upgrading to an encrypted QUIC channel...")
+		if punchErr != nil {
+			fmt.Println("direct punch failed:", punchErr)
+		} else {
+			fmt.Println("direct path is ready; waiting for peer result...")
+		}
+		if err := wsjson.Write(sigCtx, sigConn, core.Message{Type: "punch-result", Direct: punchErr == nil}); err != nil {
+			log.Fatal("report punch result: ", err)
+		}
+
+		var decision core.Message
+		if err := wsjson.Read(sigCtx, sigConn, &decision); err != nil {
+			log.Fatal("read connection decision: ", err)
+		}
+		sigConn.Close(websocket.StatusNormalClosure, "")
+		if decision.Type == "connection-failed" {
+			log.Fatal("no route to peer: ", decision.Error)
+		}
+		if decision.Type != "connection" {
+			log.Fatalf("unexpected connection decision: %q", decision.Type)
+		}
+
+		// Direct QUIC keeps using the STUN/punch socket. Relay QUIC instead uses
+		// the TURN PacketConn, after allowing the other peer's relay address.
+		transportConn := net.PacketConn(conn)
+		transportAddr := intro.Addr
+		switch decision.Mode {
+		case "direct":
+			if punchErr != nil {
+				log.Fatal("signaling selected direct despite this peer's failed punch")
+			}
+			fmt.Println("both peers reached each other directly; upgrading to QUIC...")
+		case "relay":
+			if relay == nil || intro.RelayAddr == "" {
+				log.Fatal("signaling selected relay but a relay address is missing")
+			}
+			peerRelayAddr, err := net.ResolveUDPAddr("udp", intro.RelayAddr)
+			if err != nil {
+				log.Fatal("resolve peer relay address: ", err)
+			}
+			if err := relay.Permit(peerRelayAddr); err != nil {
+				log.Fatal("permit peer relay address: ", err)
+			}
+			transportConn = relay.Conn
+			transportAddr = intro.RelayAddr
+			fmt.Println("both peers are switching to TURN relay; upgrading to QUIC...")
+		default:
+			log.Fatalf("unknown connection mode: %q", decision.Mode)
+		}
 
 		cert, err := core.SelfSignedCert(identity)
 		if err != nil {
@@ -211,7 +289,7 @@ func main() {
 		}
 		hsCtx, cancel := context.WithTimeout(context.Background(), 15*time.Second)
 		defer cancel()
-		session, err := core.SecureChannel(hsCtx, conn, intro.Addr, cert, pinnedKey, intro.Listen)
+		session, err := core.SecureChannel(hsCtx, transportConn, transportAddr, cert, pinnedKey, intro.Listen)
 		if err != nil {
 			log.Fatal("secure channel: ", err)
 		}
